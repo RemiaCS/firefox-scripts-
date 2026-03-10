@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name           Extreme Memory Controller
 // @author         Remia
-// @version        9.0
+// @version        10.0
 // @include        main
 // @onlyonce
 // ==/UserScript==
 
 // ==/Features/==
 // runaway tab kill (>400MB)
+// CPU runaway tab killer
 // heavy tab ranking
 // adaptive idle discard
 // batch tab scanning
@@ -20,7 +21,7 @@
 
 (function(){
 
-console.log(">>>> Extreme Memory Controller global init");
+console.log(">>>> Extreme Memory Controller v10 global init");
 
 function attachController(win){
 
@@ -43,15 +44,19 @@ const IDLE_MINUTES = 10;
 const RUNAWAY_TAB_MB = 400;
 const HEAVY_TAB_MB = 250;
 
-const TAB_SCAN_BATCH = 20;
+const CPU_RUNAWAY = 80; // %
 
-const CHECK_INTERVAL = 60000;
+const TAB_SCAN_BATCH = 20;
+const MAX_DISCARD_PER_CYCLE = 2;
+
+const CHECK_INTERVAL = 15000;
+
 const GC_INTERVAL = 120000;
 const PROCESS_TRIM_INTERVAL = 180000;
 
 const SHRINK_COOLDOWN = 10000;
 
-/* idle detection (prevents flicker) */
+/* idle detection */
 
 const IdleService =
 Cc["@mozilla.org/widget/useridleservice;1"]
@@ -65,8 +70,11 @@ let lastGC = 0;
 let lastTrim = 0;
 let lastShrink = 0;
 let tabScanIndex = 0;
+let optimizeCycle = 0;
 
 let tabMemory = new WeakMap();
+let tabCPU = new WeakMap();
+
 let lastFocusTime = new WeakMap();
 let frozenTabs = new WeakSet();
 
@@ -94,10 +102,8 @@ return Math.round(total / 1048576);
 /* ================= TAB UTIL ================= */
 
 function markFocused(tab){
-
 lastFocusTime.set(tab,Date.now());
 frozenTabs.delete(tab);
-
 }
 
 function idleMinutes(tab){
@@ -122,9 +128,11 @@ if(!browser) return false;
 let bc = browser.browsingContext;
 
 if(bc){
+
 if(bc.isRecordingCamera) return true;
 if(bc.isRecordingMicrophone) return true;
 if(bc.isRecordingScreen) return true;
+
 }
 
 }catch(e){}
@@ -140,9 +148,11 @@ function tabHeat(tab){
 let score = 0;
 
 let mem = tabMemory.get(tab) || 0;
+let cpu = tabCPU.get(tab) || 0;
 let idle = idleMinutes(tab);
 
 score += mem * 0.6;
+score += cpu * 2;
 score += idle * 20;
 
 if(tab.selected) score -= 1000;
@@ -157,10 +167,8 @@ return score;
 function runGC(){
 
 try{
-
 Cu.forceGC();
 Cu.forceCC();
-
 }catch(e){}
 
 }
@@ -175,9 +183,7 @@ return;
 lastShrink = now;
 
 try{
-
 Cu.schedulePreciseShrinkingGC(()=>{});
-
 }catch(e){}
 
 }
@@ -193,7 +199,7 @@ Mgr.minimizeMemoryUsage(resolve);
 
 }
 
-/* ================= TAB DISCARD ================= */
+/* ================= DISCARD ================= */
 
 function canDiscard(tab){
 
@@ -212,7 +218,7 @@ return true;
 
 function discardTab(tab){
 
-if(!canDiscard(tab)) return;
+if(!canDiscard(tab)) return false;
 
 try{
 
@@ -223,7 +229,11 @@ console.log(">>>> discarded:",tab.label);
 runGC();
 shrinkJSHeaps();
 
+return true;
+
 }catch(e){}
+
+return false;
 
 }
 
@@ -254,19 +264,34 @@ return null;
 async function analyzeProcesses(info){
 
 let heavyTabs = [];
+let discardCount = 0;
 
 for(let proc of info.children){
 
 let mb = proc.memory/1048576;
+let cpu = proc.cpu || 0;
 
 let tab = findTabByPid(proc.pid);
 
 if(!tab) continue;
 
 tabMemory.set(tab,mb);
+tabCPU.set(tab,cpu);
 
-if(mb >= RUNAWAY_TAB_MB)
-discardTab(tab);
+/* runaway memory */
+
+if(mb >= RUNAWAY_TAB_MB){
+if(discardTab(tab)) discardCount++;
+}
+
+/* runaway cpu */
+
+if(cpu >= CPU_RUNAWAY){
+console.log(">>>> CPU runaway:",tab.label,cpu,"%");
+if(discardTab(tab)) discardCount++;
+}
+
+/* heavy ranking */
 
 if(mb >= HEAVY_TAB_MB)
 heavyTabs.push(tab);
@@ -277,8 +302,15 @@ heavyTabs.push(tab);
 
 heavyTabs.sort((a,b)=>tabHeat(b)-tabHeat(a));
 
-for(let tab of heavyTabs)
-discardTab(tab);
+for(let tab of heavyTabs){
+
+if(discardCount >= MAX_DISCARD_PER_CYCLE)
+break;
+
+if(discardTab(tab))
+discardCount++;
+
+}
 
 }
 
@@ -294,7 +326,12 @@ for(let i=tabScanIndex;i<end;i++){
 
 let tab = tabs[i];
 
+if(tab.hasAttribute("pending"))
+continue;
+
 let idle = idleMinutes(tab);
+
+/* freeze */
 
 if(idle >= FREEZE_MINUTES){
 
@@ -312,6 +349,8 @@ frozenTabs.add(tab);
 }catch(e){}
 
 }
+
+/* discard rule */
 
 if(idle >= IDLE_MINUTES)
 discardTab(tab);
@@ -332,9 +371,7 @@ gBrowser.tabContainer.addEventListener("TabSelect",e=>{
 markFocused(e.target);
 
 try{
-
 e.target.linkedBrowser.browsingContext.resume();
-
 }catch(e){}
 
 });
@@ -346,17 +383,37 @@ markFocused(tab);
 
 async function optimize(){
 
-const info = await getProcessInfo();
-
-const ram = totalRAM(info);
-
-console.log(">>>> RAM:",ram,"MB");
+optimizeCycle = (optimizeCycle + 1) % 3;
 
 const now = Date.now();
 
-manageTabsBatch();
+/* cycle 1 → tab scan */
 
+if(optimizeCycle === 0){
+
+manageTabsBatch();
+return;
+
+}
+
+/* cycle 2 → process analysis */
+
+if(optimizeCycle === 1){
+
+const info = await getProcessInfo();
 await analyzeProcesses(info);
+return;
+
+}
+
+/* cycle 3 → memory maintenance */
+
+if(optimizeCycle === 2){
+
+const info = await getProcessInfo();
+const ram = totalRAM(info);
+
+console.log(">>>> RAM:",ram,"MB");
 
 if(ram >= RAM_SOFT){
 
@@ -375,8 +432,9 @@ minimizeMemory();
 if(now-lastTrim > PROCESS_TRIM_INTERVAL){
 
 Services.obs.notifyObservers(null,"memory-pressure","low-memory");
-
 lastTrim = now;
+
+}
 
 }
 
