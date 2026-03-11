@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name           Extreme Memory Controller
 // @author         Remia
-// @version        32.2
+// @version        34.3
 // @include        main
 // @onlyonce
 // ==/UserScript==
@@ -11,26 +11,26 @@
 // 👀 Viewing detection
 // 🎵 Media detection
 // 🧠 Tab score system
-// 💤 Smart tab freeze
+// 💤 Smart tab Supended
 // 🗑 Smart tab discard
 // 📌 Pinned tab timeout discard
 // 🧹 Periodic memory cleaner
 // ♻ GC + CC
 
-// Icon		Meaning
-// 👀	       active tab
-// 📌	       pinned tab
-// 🎵	      media playing
-// 🟨	         frozen
-// 🟥	     will discard soon
-// 🟩	      active/healthy
+// Icon			Meaning
+// 👀	       Active tab
+// 📌	       Pinned tab
+// 🎵	      Media playing
+// ⏸	         Supended
+// 🟥	     Will discard soon
+// 🟩	      Active/healthy
 
 // =========Features=========
 
 (function(){
 
 console.clear();
-console.log("EXTREME MEMORY CONTROLLER V32.2 INIT 🚀");
+console.log(`EXTREME MEMORY CONTROLLER V34.3 STARTING 🚀 `);
 
 function attachController(win){
 
@@ -43,18 +43,18 @@ const gBrowser = win.gBrowser;
 
 /* CONFIG */
 
-const IDLE_FREEZE = 10;	// 10 min
-const IDLE_DISCARD = 12; // 12 min
-const PINNED_DISCARD = 20;	// 20 min
+const IDLE_SUSPEND = 10;	// 10 min
+const IDLE_DISCARD = 15;	// 15 min
+const PINNED_DISCARD = 25;	// 25 min
 
 const TAB_BATCH = 15;
 const OPTIMIZE_INTERVAL = 15000;
-const CLEAN_MEMORY_PERIOD = 20*60*1000;	// 20 min
+const CLEAN_MEMORY_PERIOD = 30*60*1000;	// 30 min
 
 /* STATE */
 
 let lastFocusTime = new WeakMap();
-let frozenTabs = new WeakSet();
+let suspendedTabs = new WeakSet();
 let tabScanIndex = 0;
 
 /* SERVICES */
@@ -66,42 +66,52 @@ Cc["@mozilla.org/memory-reporter-manager;1"]
 /* UTIL */
 
 function markFocused(tab){
+
 lastFocusTime.set(tab,Date.now());
+
+if(suspendedTabs.has(tab)){
+
+try{
+
+let browser = tab.linkedBrowser;
+
+if(browser?.docShell)
+browser.docShell.isActive = true;
+
+console.log("▶ RESUMED:",tab.label);
+
+}catch(e){}
+
+suspendedTabs.delete(tab);
+
+}
+
+}
+
+function mediaState(tab){
+
+if(tab.hasPictureInPicture) return "PiP";
+if(tab.soundPlaying) return "AUDIO";
+
+return null;
+
 }
 
 function idleMinutes(tab){
 
-/* skip idle for viewing tab */
-
-if(tab.selected)
-return 0;
-
-/* skip idle for media tabs */
-
-if(mediaState(tab))
-return 0;
+if(tab.selected) return 0;
+if(mediaState(tab)) return 0;
 
 let last = lastFocusTime.get(tab);
 if(!last) return 0;
 
 return (Date.now()-last)/60000;
-}
 
-function mediaState(tab){
-
-if(tab.hasPictureInPicture)
-return "PiP";
-
-if(tab.soundPlaying)
-return "AUDIO";
-
-return null;
 }
 
 function isLoadedTab(tab){
 
-if(tab.hasAttribute("pending"))
-return false;
+if(tab.hasAttribute("pending")) return false;
 
 let browser = tab.linkedBrowser;
 if(!browser) return false;
@@ -113,28 +123,21 @@ if(url.startsWith("chrome:")) return false;
 if(url.startsWith("moz-extension:")) return false;
 
 return true;
+
 }
 
 /* TAB SCORE */
 
 function tabScore(tab){
 
-let score = 0;
+let score = idleMinutes(tab);
 
-let idle = idleMinutes(tab);
-
-score += idle;
-
-if(frozenTabs.has(tab))
-score += 5;
-
-if(tab.pinned)
-score -= 100;
-
-if(mediaState(tab))
-score -= 50;
+if(tab.pinned) score -= 100;
+if(mediaState(tab)) score -= 50;
+if(suspendedTabs.has(tab)) score += 5;
 
 return score;
+
 }
 
 /* GC */
@@ -158,6 +161,7 @@ if(mediaState(tab)) return false;
 if(!isLoadedTab(tab)) return false;
 
 return true;
+
 }
 
 function discardTab(tab){
@@ -177,23 +181,33 @@ return true;
 }catch(e){}
 
 return false;
+
 }
 
-/* FREEZE */
+/* SAFE TAB SUSPEND */
 
-function freezeTab(tab){
+function suspendTab(tab){
 
 try{
 
-if(frozenTabs.has(tab)) return;
+if(suspendedTabs.has(tab)) return;
 if(tab.selected) return;
 if(mediaState(tab)) return;
 
-tab.linkedBrowser.browsingContext.suspend();
+let browser = tab.linkedBrowser;
 
-frozenTabs.add(tab);
+if(browser){
 
-console.log("💤 FROZEN:",tab.label);
+browser.stop();
+
+if(browser.docShell)
+browser.docShell.isActive = false;
+
+}
+
+suspendedTabs.add(tab);
+
+console.log("⏸ SUSPENDED:",tab.label);
 
 }catch(e){}
 
@@ -214,14 +228,11 @@ let tab = tabs[i];
 
 if(!isLoadedTab(tab)) continue;
 if(tab.selected) continue;
-
-/* skip media tabs */
-
 if(mediaState(tab)) continue;
 
 let idle = idleMinutes(tab);
 
-/* pinned timeout */
+/* pinned tabs */
 
 if(tab.pinned){
 
@@ -234,12 +245,13 @@ discardTab(tab);
 }
 
 continue;
+
 }
 
-/* freeze */
+/* suspend */
 
-if(idle >= IDLE_FREEZE)
-freezeTab(tab);
+if(idle >= IDLE_SUSPEND)
+suspendTab(tab);
 
 /* discard */
 
@@ -267,30 +279,23 @@ tabs.sort((a,b)=>tabScore(b)-tabScore(a));
 
 console.clear();
 
-console.log(
-"🧠 TAB MONITOR ("+tabs.length+" tabs)"
-);
+console.log("🧠 TAB MONITOR ("+tabs.length+" tabs)");
 
 for(let i=0;i<tabs.length;i++){
 
 let tab = tabs[i];
-
-let idle =
-Math.round(idleMinutes(tab));
+let idle = Math.round(idleMinutes(tab));
 
 let flags = [];
 
-if(tab.selected)
-flags.push("👀 VIEWING");
-
-if(tab.pinned)
-flags.push("📌 PINNED");
+if(tab.selected) flags.push("👀 VIEWING");
+if(tab.pinned) flags.push("📌 PINNED");
 
 if(mediaState(tab))
 flags.push("🎵 PLAYING MEDIA");
 
-if(frozenTabs.has(tab))
-flags.push("💤 FROZEN");
+if(suspendedTabs.has(tab))
+flags.push("⏸ SUSPENDED");
 
 if(!tab.pinned && idle >= IDLE_DISCARD && !mediaState(tab))
 flags.push("🟥 DISCARD SOON");
@@ -332,6 +337,7 @@ return true;
 }catch(e){}
 
 return false;
+
 }
 
 function cleanMemory(){
@@ -353,30 +359,15 @@ console.log("✅ MEMORY CLEANED");
 
 });
 
-}catch(e){
-
-console.log(e);
-
-}
+}catch(e){}
 
 }
 
 /* LOOPS */
 
-win.setInterval(
-manageTabs,
-OPTIMIZE_INTERVAL
-);
-
-win.setInterval(
-logTabs,
-30000
-);
-
-win.setInterval(
-cleanMemory,
-CLEAN_MEMORY_PERIOD
-);
+win.setInterval(manageTabs,OPTIMIZE_INTERVAL);
+win.setInterval(logTabs,30000);
+win.setInterval(cleanMemory,CLEAN_MEMORY_PERIOD);
 
 /* EVENTS */
 
@@ -388,6 +379,19 @@ e=>markFocused(e.target)
 for(let tab of gBrowser.tabs)
 markFocused(tab);
 
+console.clear();
+
+console.log(`EXTREME MEMORY CONTROLLER V34.3 INIT 🚀 
+Features:
+🕒 Idle tab monitoring
+👀 Viewing detection
+🎵 Media detection
+🧠 Tab score system
+💤 Smart tab Supended
+🗑 Smart tab discard
+📌 Pinned tab timeout discard
+🧹 Periodic memory cleaner
+♻ GC + CC`);
 console.log("✅ EMC READY");
 
 }
