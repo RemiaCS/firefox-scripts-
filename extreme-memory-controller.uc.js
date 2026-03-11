@@ -6,6 +6,27 @@
 // @onlyonce
 // ==/UserScript==
 
+// =========Features=========
+// 🕒 Idle tab monitoring
+// 👀 Viewing detection
+// 🎵 Media detection
+// 🧠 Tab score system
+// 💤 Smart tab freeze
+// 🗑 Smart tab discard
+// 📌 Pinned tab timeout discard
+// 🧹 Periodic memory cleaner
+// ♻ GC + CC
+
+// Icon		Meaning
+// 👀	       active tab
+// 📌	       pinned tab
+// 🎵	      media playing
+// 🟨	         frozen
+// 🟥	     will discard soon
+// 🟩	      active/healthy
+
+// =========Features=========
+
 (function(){
 
 console.clear();
